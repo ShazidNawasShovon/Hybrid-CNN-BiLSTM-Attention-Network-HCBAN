@@ -1,0 +1,211 @@
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import json
+import os
+from sklearn.metrics import confusion_matrix, roc_curve, auc
+import glob
+
+class ResearchVisualizer:
+    def __init__(self, results_path='results/research_results.json', output_dir='plots/research'):
+        self.results_path = results_path
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.load_results()
+        
+    def load_results(self):
+        if os.path.exists(self.results_path):
+            with open(self.results_path, 'r') as f:
+                self.results = json.load(f)
+        else:
+            print(f"Results file not found: {self.results_path}")
+            self.results = {}
+
+    def plot_roc_curve(self, classes):
+        """
+        Plots ROC curves for each class (Macro-average across folds if possible, 
+        or for the best fold). Here we aggregate or plot the last available fold.
+        """
+        # Find prediction files
+        pred_files = glob.glob(os.path.join('results', 'fold_*_predictions.npz'))
+        if not pred_files:
+            print("No prediction files found for ROC plotting.")
+            return
+
+        # Use the first file for demonstration (or iterate to average)
+        # Ideally, we should plot Micro/Macro average over all folds
+        
+        plt.figure(figsize=(10, 8))
+        
+        # Aggregate y_true and y_score
+        all_y_true = []
+        all_y_score = []
+        
+        for f in pred_files:
+            data = np.load(f)
+            all_y_true.append(data['y_true'])
+            all_y_score.append(data['y_pred_prob'])
+            
+        y_true = np.concatenate(all_y_true)
+        y_score = np.concatenate(all_y_score)
+        
+        # Binarize labels for multi-class ROC
+        from sklearn.preprocessing import label_binarize
+        n_classes = len(classes)
+        y_test_bin = label_binarize(y_true, classes=range(n_classes))
+        
+        # Compute ROC curve and ROC area for each class
+        fpr = dict()
+        tpr = dict()
+        roc_auc = dict()
+        
+        for i in range(n_classes):
+            fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
+            roc_auc[i] = auc(fpr[i], tpr[i])
+            
+        # Plot all ROC curves
+        colors = plt.cm.get_cmap('tab10', n_classes)
+        for i, color in zip(range(n_classes), colors.colors):
+            plt.plot(fpr[i], tpr[i], color=color, lw=2,
+                     label='ROC curve of class {0} (area = {1:0.2f})'
+                     ''.format(classes[i], roc_auc[i]))
+
+        plt.plot([0, 1], [0, 1], 'k--', lw=2)
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic (Multi-Class)')
+        plt.legend(loc="lower right")
+        plt.savefig(os.path.join(self.output_dir, 'roc_curve.png'), dpi=300)
+        plt.close()
+        print(f"Saved ROC curve to {self.output_dir}/roc_curve.png")
+
+    def plot_training_history(self):
+        """
+        Plots training and validation accuracy/loss curves aggregated over folds.
+        """
+        history_files = glob.glob(os.path.join('results', 'fold_*_history.json'))
+        if not history_files:
+            print("No history files found.")
+            return
+            
+        # Aggregate metrics
+        metrics = ['accuracy', 'val_accuracy', 'loss', 'val_loss']
+        agg_history = {m: [] for m in metrics}
+        
+        for f in history_files:
+            with open(f, 'r') as file:
+                h = json.load(file)
+                for m in metrics:
+                    if m in h:
+                        agg_history[m].append(h[m])
+        
+        # Plot Mean +/- Std
+        epochs = range(1, len(agg_history['accuracy'][0]) + 1)
+        
+        plt.figure(figsize=(12, 5))
+        
+        # Accuracy Plot
+        plt.subplot(1, 2, 1)
+        for m, label in [('accuracy', 'Training Acc'), ('val_accuracy', 'Validation Acc')]:
+            data = np.array(agg_history[m])
+            mean = np.mean(data, axis=0)
+            std = np.std(data, axis=0)
+            plt.plot(epochs, mean, label=label)
+            plt.fill_between(epochs, mean - std, mean + std, alpha=0.2)
+            
+        plt.title('Model Accuracy')
+        plt.xlabel('Epochs')
+        plt.ylabel('Accuracy')
+        plt.legend()
+        
+        # Loss Plot
+        plt.subplot(1, 2, 2)
+        for m, label in [('loss', 'Training Loss'), ('val_loss', 'Validation Loss')]:
+            data = np.array(agg_history[m])
+            mean = np.mean(data, axis=0)
+            std = np.std(data, axis=0)
+            plt.plot(epochs, mean, label=label)
+            plt.fill_between(epochs, mean - std, mean + std, alpha=0.2)
+            
+        plt.title('Model Loss')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, 'training_history.png'), dpi=300)
+        plt.close()
+        print(f"Saved training history plot to {self.output_dir}/training_history.png")
+
+    def plot_metrics_comparison(self):
+        """
+        Plots a bar chart comparing Accuracy, Precision, Recall, F1, AUC
+        with error bars (Standard Deviation) from K-Fold CV.
+        """
+        if 'HCBAN_CV' not in self.results:
+            return
+            
+        metrics = ['accuracy', 'precision', 'recall', 'f1', 'auc']
+        means = []
+        stds = []
+        
+        summary = self.results['HCBAN_CV']['summary']
+        
+        for m in metrics:
+            means.append(summary.get(f'mean_{m}', 0))
+            stds.append(summary.get(f'std_{m}', 0))
+            
+        plt.figure(figsize=(10, 6))
+        sns.set_style("whitegrid")
+        bars = plt.bar(metrics, means, yerr=stds, capsize=10, color=['#4c72b0', '#55a868', '#c44e52', '#8172b2', '#ccb974'])
+        
+        plt.title('HCBAN Performance Metrics (5-Fold CV)', fontsize=16)
+        plt.ylabel('Score', fontsize=12)
+        plt.ylim(0.0, 1.05)
+        
+        # Add values on top
+        for bar, mean in zip(bars, means):
+            plt.text(bar.get_x() + bar.get_width()/2, mean + 0.02, f'{mean:.4f}', 
+                     ha='center', va='bottom', fontsize=11, fontweight='bold')
+            
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, 'metrics_comparison.png'), dpi=300)
+        plt.close()
+        print(f"Saved metrics comparison plot to {self.output_dir}/metrics_comparison.png")
+
+    def plot_training_history(self, history):
+        """
+        Plots training and validation accuracy/loss curves.
+        Args:
+            history: Keras History object or dict.
+        """
+        # This requires history object, typically passed during training.
+        # If we saved history in results, we can plot it.
+        # For now, let's assume we pass a dummy history or skip if not available.
+        pass
+
+    def plot_confusion_matrix(self, y_true, y_pred, classes):
+        """
+        Plots a publication-ready confusion matrix.
+        """
+        cm = confusion_matrix(y_true, y_pred)
+        # Normalize
+        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues', 
+                    xticklabels=classes, yticklabels=classes)
+        plt.title('Confusion Matrix (Normalized)', fontsize=16)
+        plt.ylabel('True Label', fontsize=12)
+        plt.xlabel('Predicted Label', fontsize=12)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, 'confusion_matrix.png'), dpi=300)
+        plt.close()
+        print(f"Saved confusion matrix to {self.output_dir}/confusion_matrix.png")
+
+if __name__ == "__main__":
+    viz = ResearchVisualizer()
+    viz.plot_metrics_comparison()

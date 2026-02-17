@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "D:\Personal\Development\Python\Hybrid Explainable AI Moon\src\research\research_pipeline.py", line 19, in <module>
+    from src.research.hcban_model import HCBAN
+ModuleNotFoundError: No module named 'src'
