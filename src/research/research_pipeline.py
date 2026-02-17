@@ -1,9 +1,13 @@
 import sys
+import os
+
+# Add the project root directory to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 # Redirect stdout/stderr to a log file
-log_file = open("research_pipeline.log", "w")
-sys.stdout = log_file
-sys.stderr = log_file
+# log_file = open("research_pipeline.log", "w")
+# sys.stdout = log_file
+# sys.stderr = log_file
 
 import pandas as pd
 import numpy as np
@@ -17,6 +21,7 @@ import json
 import matplotlib.pyplot as plt
 import seaborn as sns
 from src.research.hcban_model import HCBAN
+from src.data_preprocessing import load_data as load_raw_data, preprocess_data
 
 class ResearchPipeline:
     def __init__(self, data_path='processed_data', n_splits=5, batch_size=256, epochs=10):
@@ -26,6 +31,39 @@ class ResearchPipeline:
         self.epochs = epochs
         self.results = {}
         
+    def setup_dataset(self):
+        print("\n--- Dataset Selection ---")
+        print("1. Split Dataset (UNSW_NB15_training-set.csv + testing-set.csv)")
+        print("2. Combined Dataset (combined_dataset_final.csv)")
+        
+        choice = input("Select dataset (1 or 2): ").strip()
+        
+        if choice == '2':
+            dataset_type = 'combined'
+            combined_path = r'd:\Personal\Development\Python\Hybrid Explainable AI Moon\dataset_combined\combined_dataset_final.csv'
+            # Check if file exists, if not ask user
+            if not os.path.exists(combined_path):
+                print(f"Default path {combined_path} not found.")
+                combined_path = input("Enter path to combined_dataset_final.csv: ").strip()
+        else:
+            dataset_type = 'split'
+            combined_path = None
+            
+        print(f"Selected: {dataset_type}")
+        
+        # Load and Preprocess
+        print("Loading and preprocessing data...")
+        df = load_raw_data(dataset_type=dataset_type, combined_path=combined_path)
+        X_train, X_test, y_train, y_test, features, le = preprocess_data(df)
+        
+        # Save processed data (overwriting existing)
+        os.makedirs(self.data_path, exist_ok=True)
+        X_train.to_csv(os.path.join(self.data_path, 'X_train.csv'), index=False)
+        X_test.to_csv(os.path.join(self.data_path, 'X_test.csv'), index=False)
+        np.save(os.path.join(self.data_path, 'y_train.npy'), y_train)
+        np.save(os.path.join(self.data_path, 'y_test.npy'), y_test)
+        print("Data preprocessing complete.")
+
     def load_data(self):
         print("Loading data for research pipeline...")
         X_train = pd.read_csv(os.path.join(self.data_path, 'X_train.csv'))
@@ -157,6 +195,7 @@ class ResearchPipeline:
 if __name__ == "__main__":
     # Reduced epochs for quick testing, use 20-30 for actual run
     pipeline = ResearchPipeline(epochs=5) 
+    pipeline.setup_dataset()
     pipeline.load_data()
     pipeline.run_kfold_cv()
     pipeline.generate_report()

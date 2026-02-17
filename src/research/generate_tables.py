@@ -2,6 +2,10 @@ import json
 import pandas as pd
 import numpy as np
 import os
+import sys
+
+# Add the project root directory to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 def generate_latex_table(results_path='results/research_results.json'):
     if not os.path.exists(results_path):

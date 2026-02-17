@@ -4,8 +4,12 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import sys
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 import glob
+
+# Add the project root directory to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 class ResearchVisualizer:
     def __init__(self, results_path='results/research_results.json', output_dir='plots/research'):
