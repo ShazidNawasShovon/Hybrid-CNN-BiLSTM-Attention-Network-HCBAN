@@ -47,8 +47,8 @@ We propose the **Hybrid CNN-BiLSTM-Attention Network (HCBAN)** to bridge these g
 
 1.  **Clone the Repository**:
     ```bash
-    git clone <repository_url>
-    cd Hybrid-Explainable-AI-Moon
+    git clone https://github.com/ShazidNawasShovon/Hybrid-CNN-BiLSTM-Attention-Network-HCBAN.git
+    cd Hybrid-CNN-BiLSTM-Attention-Network-HCBAN
     ```
 
 2.  **Install Dependencies**:
