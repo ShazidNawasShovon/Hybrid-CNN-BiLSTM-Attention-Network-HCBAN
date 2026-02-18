@@ -10,3 +10,4 @@ lightgbm
 tensorflow
 keras
 jupyter
+imbalanced-learn

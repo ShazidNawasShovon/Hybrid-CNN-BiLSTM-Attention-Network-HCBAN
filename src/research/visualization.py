@@ -7,6 +7,7 @@ import os
 import sys
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 import glob
+import joblib
 
 # Add the project root directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -53,27 +54,34 @@ class ResearchVisualizer:
             
         y_true = np.concatenate(all_y_true)
         y_score = np.concatenate(all_y_score)
+        if y_score.ndim == 1:
+            y_score = np.column_stack([1.0 - y_score, y_score])
+        elif y_score.ndim == 2 and y_score.shape[1] == 1 and len(classes) == 2:
+            y_score = np.column_stack([1.0 - y_score[:, 0], y_score[:, 0]])
         
-        # Binarize labels for multi-class ROC
-        from sklearn.preprocessing import label_binarize
         n_classes = len(classes)
-        y_test_bin = label_binarize(y_true, classes=range(n_classes))
-        
-        # Compute ROC curve and ROC area for each class
-        fpr = dict()
-        tpr = dict()
-        roc_auc = dict()
-        
-        for i in range(n_classes):
-            fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
-            roc_auc[i] = auc(fpr[i], tpr[i])
-            
-        # Plot all ROC curves
-        colors = plt.cm.get_cmap('tab10', n_classes)
-        for i, color in zip(range(n_classes), colors.colors):
-            plt.plot(fpr[i], tpr[i], color=color, lw=2,
-                     label='ROC curve of class {0} (area = {1:0.2f})'
-                     ''.format(classes[i], roc_auc[i]))
+        if n_classes == 2:
+            fpr, tpr, _ = roc_curve(y_true, y_score[:, 1])
+            roc_auc = auc(fpr, tpr)
+            plt.plot(fpr, tpr, color='#4c72b0', lw=2, label=f'ROC curve (area = {roc_auc:0.2f})')
+        else:
+            from sklearn.preprocessing import label_binarize
+            y_test_bin = label_binarize(y_true, classes=range(n_classes))
+            fpr = dict()
+            tpr = dict()
+            roc_auc = dict()
+            for i in range(n_classes):
+                fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
+                roc_auc[i] = auc(fpr[i], tpr[i])
+            colors = plt.cm.get_cmap('tab10', n_classes)
+            for i, color in zip(range(n_classes), colors.colors):
+                plt.plot(
+                    fpr[i],
+                    tpr[i],
+                    color=color,
+                    lw=2,
+                    label='ROC curve of class {0} (area = {1:0.2f})'.format(classes[i], roc_auc[i]),
+                )
 
         plt.plot([0, 1], [0, 1], 'k--', lw=2)
         plt.xlim([0.0, 1.0])
@@ -105,9 +113,21 @@ class ResearchVisualizer:
                 for m in metrics:
                     if m in h:
                         agg_history[m].append(h[m])
+
+        min_len = None
+        for m in metrics:
+            if agg_history[m]:
+                m_min = min(len(seq) for seq in agg_history[m])
+                min_len = m_min if min_len is None else min(min_len, m_min)
+        if not min_len or min_len < 1:
+            print("Training history files are empty.")
+            return
+
+        for m in metrics:
+            agg_history[m] = [seq[:min_len] for seq in agg_history[m] if len(seq) >= min_len]
         
         # Plot Mean +/- Std
-        epochs = range(1, len(agg_history['accuracy'][0]) + 1)
+        epochs = range(1, min_len + 1)
         
         plt.figure(figsize=(12, 5))
         
@@ -180,7 +200,7 @@ class ResearchVisualizer:
         plt.close()
         print(f"Saved metrics comparison plot to {self.output_dir}/metrics_comparison.png")
 
-    def plot_training_history(self, history):
+    def plot_training_history_single(self, history):
         """
         Plots training and validation accuracy/loss curves.
         Args:
@@ -190,6 +210,57 @@ class ResearchVisualizer:
         # If we saved history in results, we can plot it.
         # For now, let's assume we pass a dummy history or skip if not available.
         pass
+
+    def plot_holdout_results(self, classes):
+        path = os.path.join('results', 'holdout_test_predictions.npz')
+        if not os.path.exists(path):
+            print("No holdout prediction file found.")
+            return
+        data = np.load(path)
+        y_true = data['y_true']
+        y_pred = data['y_pred']
+        y_score = data['y_pred_prob']
+        if y_score.ndim == 1:
+            y_score = np.column_stack([1.0 - y_score, y_score])
+        elif y_score.ndim == 2 and y_score.shape[1] == 1 and len(classes) == 2:
+            y_score = np.column_stack([1.0 - y_score[:, 0], y_score[:, 0]])
+
+        self.plot_confusion_matrix(y_true, y_pred, classes)
+
+        plt.figure(figsize=(10, 8))
+        n_classes = len(classes)
+        if n_classes == 2:
+            fpr, tpr, _ = roc_curve(y_true, y_score[:, 1])
+            roc_auc_val = auc(fpr, tpr)
+            plt.plot(fpr, tpr, color='#4c72b0', lw=2, label=f'ROC curve (area = {roc_auc_val:0.2f})')
+        else:
+            from sklearn.preprocessing import label_binarize
+            y_test_bin = label_binarize(y_true, classes=range(n_classes))
+            fpr = dict()
+            tpr = dict()
+            roc_auc = dict()
+            for i in range(n_classes):
+                fpr[i], tpr[i], _ = roc_curve(y_test_bin[:, i], y_score[:, i])
+                roc_auc[i] = auc(fpr[i], tpr[i])
+            colors = plt.cm.get_cmap('tab10', n_classes)
+            for i, color in zip(range(n_classes), colors.colors):
+                plt.plot(
+                    fpr[i],
+                    tpr[i],
+                    color=color,
+                    lw=2,
+                    label='ROC curve of class {0} (area = {1:0.2f})'.format(classes[i], roc_auc[i]),
+                )
+        plt.plot([0, 1], [0, 1], 'k--', lw=2)
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Holdout Test ROC (Multi-Class)')
+        plt.legend(loc="lower right")
+        plt.savefig(os.path.join(self.output_dir, 'holdout_roc_curve.png'), dpi=300)
+        plt.close()
+        print(f"Saved holdout ROC curve to {self.output_dir}/holdout_roc_curve.png")
 
     def plot_confusion_matrix(self, y_true, y_pred, classes):
         """
@@ -212,4 +283,22 @@ class ResearchVisualizer:
 
 if __name__ == "__main__":
     viz = ResearchVisualizer()
+    classes = None
+    label_encoder_path = os.path.join('models', 'label_encoder.joblib')
+    if os.path.exists(label_encoder_path):
+        le = joblib.load(label_encoder_path)
+        classes = [str(x) for x in le.classes_]
+    else:
+        pred_files = glob.glob(os.path.join('results', 'fold_*_predictions.npz'))
+        if pred_files:
+            data = np.load(pred_files[0])
+            n_classes = int(data['y_pred_prob'].shape[1])
+            classes = [str(i) for i in range(n_classes)]
+        else:
+            classes = []
+
     viz.plot_metrics_comparison()
+    if classes:
+        viz.plot_roc_curve(classes)
+        viz.plot_training_history()
+        viz.plot_holdout_results(classes)

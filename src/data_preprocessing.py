@@ -28,24 +28,21 @@ def load_data(dataset_type='split', combined_path=None):
         
         full_df = pd.concat([df1, df2], axis=0, ignore_index=True)
     
-    # Drop 'id' and 'label' immediately as they are not needed for multi-class
-    # We keep 'attack_cat' as the target
-    # Check if columns exist before dropping
-    drop_cols = ['id', 'label']
+    drop_cols = ['id']
     full_df = full_df.drop(columns=[c for c in drop_cols if c in full_df.columns], errors='ignore')
     
     return full_df
 
-def preprocess_data(df):
-    # Check if 'attack_cat' exists
-    if 'attack_cat' not in df.columns:
-        # It might be named differently in the combined dataset or split files
-        # Let's print columns to debug if needed, but for now assuming standard UNSW-NB15 format
-        # Common variations: 'attack_cat', 'cat'
-        pass
+def preprocess_data(df, target_col='attack_cat'):
+    if target_col not in df.columns:
+        raise ValueError(f"Target column '{target_col}' not found in dataset. Available columns: {list(df.columns)}")
 
-    X = df.drop('attack_cat', axis=1, errors='ignore')
-    y = df['attack_cat'] if 'attack_cat' in df.columns else df.iloc[:, -1] # Fallback to last column
+    X = df.drop(target_col, axis=1, errors='ignore')
+    if target_col == 'label' and 'attack_cat' in X.columns:
+        X = X.drop(columns=['attack_cat'], errors='ignore')
+    if target_col == 'attack_cat' and 'label' in X.columns:
+        X = X.drop(columns=['label'], errors='ignore')
+    y = df[target_col]
     
     # Split into train and test
     # Stratify to maintain class distribution
@@ -105,7 +102,10 @@ def preprocess_data(df):
             feature_names.extend(list(cat_feature_names))
         except Exception as e:
             print(f"Warning: Could not retrieve feature names from OneHotEncoder: {e}")
-            # Fallback: generate dummy names if needed, but usually get_feature_names_out works
+            # Fallback: generate dummy names if needed
+            # The number of new columns is total columns - num_cols
+            n_new = X_train_processed.shape[1] - len(num_cols)
+            feature_names.extend([f"cat_{i}" for i in range(n_new)])
             
     # Convert back to DataFrame
     X_train_processed_df = pd.DataFrame(X_train_processed, columns=feature_names)

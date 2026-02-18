@@ -1,9 +1,9 @@
-# Hybrid Explainable AI (XAI) Intrusion Detection System (IDS) > 97% Accuracy
+# Hybrid Explainable AI (XAI) Intrusion Detection System (IDS)
 
 ## Overview
-This project implements a state-of-the-art **Hybrid Explainable AI (XAI) Intrusion Detection System (IDS)** using the **UNSW-NB15** dataset. It addresses the "Black Box" problem of Deep Learning models in security while achieving high accuracy (>97%) through a novel Hybrid Deep-Stacking architecture.
+This project implements a **Hybrid Explainable AI (XAI) Intrusion Detection System (IDS)** with a research pipeline designed for reproducible experiments, GPU training, and thesis-ready outputs (tables + figures).
 
-The core of this project is the **Hybrid CNN-BiLSTM-Attention Network (HCBAN)**, which combines the strengths of spatial feature extraction (CNN), temporal sequence modeling (BiLSTM), and dynamic contextual focus (Multi-Head Attention). This architecture is explicitly optimized for **GPU acceleration** using Mixed Precision training.
+The core deep model is the **Hybrid CNN-BiLSTM-Attention Network (HCBAN)** (PyTorch), combined with a tabular ML ensemble (XGBoost/LightGBM/RandomForest) using soft-voting to improve robustness.
 
 ## Research Gap & Novelty
 
@@ -18,16 +18,18 @@ Modern Intrusion Detection Systems (IDS) face several critical challenges:
 We propose the **Hybrid CNN-BiLSTM-Attention Network (HCBAN)** to bridge these gaps:
 *   **Hybrid Architecture**: Unifies **1D-CNN** (Spatial), **BiLSTM** (Temporal), and **Multi-Head Attention** (Contextual Focus) into a single efficient framework.
 *   **Attention Mechanism**: Dynamically weighs the importance of different packet segments, allowing the model to focus on malicious signatures regardless of their position.
-*   **GPU Acceleration**: Implements `mixed_float16` precision to leverage NVIDIA Tensor Cores, reducing memory usage by ~50% and significantly speeding up training.
+*   **GPU Acceleration**: Runs on CUDA-enabled GPUs via PyTorch (`torch.device('cuda')`) for faster training and evaluation.
 *   **Explainability**: Integrates SHAP (SHapley Additive exPlanations) to provide transparent, actionable "Risk Reports" for every detection.
 
 ## Project Structure
-- `dataset/`: Contains the UNSW-NB15 dataset files.
+- `dataset/`: Split UNSW-NB15 CSV files (optional mode).
+- `dataset_combined/`: Combined dataset file (default mode).
+- `processed_data/`: Cached train/test splits after preprocessing.
 - `src/`: Source code for the pipeline.
   - `data_preprocessing.py`: Data loading, cleaning, encoding, and normalization.
   - `research/`: **Core Research Module**
-    - `hcban_model.py`: Implementation of the HCBAN architecture with GPU optimizations.
-    - `research_pipeline.py`: Automated 5-Fold Cross-Validation pipeline.
+    - `hcban_model.py`: PyTorch implementation of the HCBAN architecture.
+    - `research_pipeline.py`: End-to-end research runner (preprocess → CV → holdout test → plots/tables).
     - `visualization.py`: Generates publication-ready figures (ROC, Confusion Matrices).
     - `generate_tables.py`: Creates LaTeX/CSV tables for thesis documentation.
   - `explainability.py`: SHAP integration for global and local explanations.
@@ -40,7 +42,7 @@ We propose the **Hybrid CNN-BiLSTM-Attention Network (HCBAN)** to bridge these g
 
 ### Prerequisites
 *   **Python 3.8+**
-*   **NVIDIA GPU** (Recommended) with CUDA 11+ drivers.
+*   **NVIDIA GPU** (Recommended) with CUDA drivers installed.
 *   **Docker** (Optional, for containerized run).
 
 ### 1. Installation (Local)
@@ -55,41 +57,71 @@ We propose the **Hybrid CNN-BiLSTM-Attention Network (HCBAN)** to bridge these g
     ```bash
     pip install -r requirements.txt
     ```
-    *Note: This installs TensorFlow, XGBoost, LightGBM, SHAP, and other required libraries.*
+3.  **Install PyTorch**:
+    ```bash
+    pip install torch
+    ```
+    If you want GPU acceleration, install a CUDA-enabled PyTorch build that matches your system CUDA setup.
 
-### 2. Running the Research Pipeline
+### 2. Dataset Setup
+
+#### Option A: Combined Dataset (Default)
+- Place the file here: `dataset_combined/combined_dataset_final.csv`
+- Expected columns include: `attack_cat`, `label`, and `dataset_source`
+
+#### Option B: Split UNSW-NB15 Dataset
+- Place these files here:
+  - `dataset/UNSW_NB15_training-set.csv`
+  - `dataset/UNSW_NB15_testing-set.csv`
+
+### 3. Running the Research Pipeline (Full Process)
 This is the main process to train the model, evaluate performance, and generate all thesis materials.
 
 #### Option A: Local Execution (Recommended)
-1.  **Run the Pipeline**:
-    Executes 5-Fold Stratified Cross-Validation on the HCBAN model.
+1.  **Run the full research runner**:
     ```bash
     python src/research/research_pipeline.py
     ```
-    *Action*: Trains the model 5 times, saves metrics to `results/research_results.json`, and saves raw predictions to `results/fold_*_predictions.npz`.
+    By default, the script runs:
+    - Dataset: Combined (`dataset_combined/combined_dataset_final.csv`)
+    - Task: Binary classification (`label`)
 
-2.  **Generate Figures**:
-    Creates high-quality plots for your thesis.
+    To switch dataset/task, edit the `setup_dataset(...)` call in [research_pipeline.py](file:///d:/Personal/Development/Python/Hybrid%20Explainable%20AI%20Moon/src/research/research_pipeline.py) or run it from Python and call `setup_dataset(choice=None, task_choice=None)` for interactive selection.
+
+    Outputs:
+    - Metrics: `results/research_results.json`
+    - Per-fold artifacts:
+      - `results/fold_<k>_predictions.npz`
+      - `results/fold_<k>_history.json`
+      - `results/fold_<k>_best_model.pth`
+    - Holdout test artifacts:
+      - `results/holdout_test_predictions.npz`
+      - `results/holdout_history.json`
+      - `results/holdout_best_model.pth`
+    - Plots (thesis figures): `plots/research/*.png`
+    - Tables (thesis tables): `results/thesis_*.csv` and `results/thesis_*.tex`
+
+2.  **(Optional) Regenerate figures only**:
     ```bash
     python src/research/visualization.py
     ```
-    *Output*: Check `plots/research/` for:
-    *   `roc_curve.png`: Multi-class ROC Curves with AUC scores.
-    *   `confusion_matrix.png`: Normalized Confusion Matrix heatmap.
-    *   `training_history.png`: Accuracy and Loss curves over epochs.
-    *   `metrics_comparison.png`: Bar chart of metrics with error bars.
+    Output directory: `plots/research/`
+    - `metrics_comparison.png`
+    - `roc_curve.png`
+    - `training_history.png`
+    - `confusion_matrix.png`
+    - `holdout_roc_curve.png`
 
-3.  **Generate Tables**:
-    Creates formatted tables for your thesis document.
+3.  **(Optional) Regenerate tables only**:
     ```bash
     python src/research/generate_tables.py
     ```
-    *Output*: Check `results/` for:
-    *   `thesis_performance_table.tex`: LaTeX code to copy-paste into your thesis.
-    *   `thesis_performance_table.csv`: Raw CSV data for Excel/Word.
+    Output directory: `results/`
+    - `thesis_performance_table.csv` and `thesis_performance_table.tex`
+    - `thesis_holdout_test_table.csv` and `thesis_holdout_test_table.tex`
 
 #### Option B: Docker Execution
-Use this if you want a consistent, isolated environment.
+Docker support is optional. The current [Dockerfile](file:///d:/Personal/Development/Python/Hybrid%20Explainable%20AI%20Moon/Dockerfile) is legacy and may require updates for the latest PyTorch-based research pipeline. Local execution is recommended.
 
 1.  **Build Image**:
     ```bash
@@ -102,7 +134,7 @@ Use this if you want a consistent, isolated environment.
     docker run --gpus all -v $(pwd)/results:/app/results -v $(pwd)/plots:/app/plots hcban-ids
     ```
 
-### 3. Generating Explanations (XAI)
+### 4. Generating Explanations (XAI)
 To understand *why* the model flagged a specific packet:
 
 ```bash
@@ -128,23 +160,21 @@ For your thesis, use the generated assets found in these directories:
 ## Methodology Summary
 
 1.  **Data Preprocessing**:
-    *   **Cleaning**: Handling missing values and dropping irrelevant columns (`id`, `label`).
-    *   **Encoding**: One-Hot Encoding for `state` and `service`; Frequency Encoding for `proto`.
-    *   **Normalization**: StandardScaler applied to all numerical features.
-    *   **Reshaping**: Transforming tabular data into 3D format `(samples, features, 1)` for CNN input.
+    *   **Cleaning**: Imputation for missing values; drop `id` if present.
+    *   **Encoding**: OneHotEncoder for categorical columns; StandardScaler for numerical columns.
+    *   **Leakage Control**: Drops `attack_cat` when predicting `label` and drops `label` when predicting `attack_cat`.
+    *   **Reshaping**: Converts tabular features to `(samples, features, 1)` for the PyTorch CNN input.
 
 2.  **Model Architecture (HCBAN)**:
-    *   **Input Layer**: Accepts reshaped feature sequences.
-    *   **CNN Block**: Two layers of 1D-Conv + BatchNorm + MaxPool to extract local patterns.
-    *   **BiLSTM Block**: Bidirectional LSTM (128 units) to capture sequential dependencies.
-    *   **Attention Block**: Multi-Head Attention (4 heads) to focus on critical time steps.
-    *   **Classification Head**: Global Average Pooling -> Dense (256, 128) -> Softmax.
+    *   **CNN Block**: Two 1D-Conv + BatchNorm + MaxPool layers for local pattern extraction.
+    *   **BiLSTM Block**: Bidirectional LSTM for sequential dependencies.
+    *   **Attention Block**: Multi-Head Self-Attention for contextual focus.
+    *   **Head**: Dense layers → logits/probabilities.
 
 3.  **Training Strategy**:
-    *   **Loss Function**: Sparse Categorical Crossentropy.
-    *   **Optimizer**: Adam (learning rate = 0.001) with ReduceLROnPlateau.
-    *   **Regularization**: Dropout (0.3 - 0.4) and Early Stopping.
-    *   **Acceleration**: Mixed Precision (`mixed_float16`) for GPU efficiency.
+    *   **Optimizer**: Adam.
+    *   **Regularization**: Dropout + early stopping.
+    *   **Class Imbalance**: Class-weighted loss and sample-weighted ML training; optional capped undersampling for extreme imbalance cases.
 
 ## License
 MIT
