@@ -33,7 +33,15 @@ def load_data(dataset_type='split', combined_path=None):
     
     return full_df
 
-def preprocess_data(df, target_col='attack_cat'):
+def preprocess_data(
+    df,
+    target_col='attack_cat',
+    split_strategy='stratified',
+    holdout_source=None,
+    source_col='dataset_source',
+    include_source_feature=True,
+    feature_engineering=True,
+):
     if target_col not in df.columns:
         raise ValueError(f"Target column '{target_col}' not found in dataset. Available columns: {list(df.columns)}")
 
@@ -42,13 +50,39 @@ def preprocess_data(df, target_col='attack_cat'):
         X = X.drop(columns=['attack_cat'], errors='ignore')
     if target_col == 'attack_cat' and 'label' in X.columns:
         X = X.drop(columns=['label'], errors='ignore')
+    if not include_source_feature and source_col in X.columns:
+        X = X.drop(columns=[source_col], errors='ignore')
     y = df[target_col]
+
+    if feature_engineering:
+        eps = 1e-6
+        if 'dbytes' in X.columns and 'dpkts' in X.columns:
+            X['dbytes_per_dpkt'] = X['dbytes'] / (X['dpkts'] + eps)
+        if 'spkts' in X.columns and 'dpkts' in X.columns:
+            X['spkts_per_dpkts'] = X['spkts'] / (X['dpkts'] + eps)
+        if 'rate' in X.columns and 'spkts' in X.columns and 'dpkts' in X.columns:
+            X['rate_per_pkt'] = X['rate'] / (X['spkts'] + X['dpkts'] + eps)
+        if 'dur' in X.columns:
+            X['dur_log1p'] = np.log1p(np.maximum(X['dur'].astype(float), 0.0))
+        if 'dwin' in X.columns and 'rate' in X.columns:
+            X['dwin_x_rate'] = X['dwin'] * X['rate']
     
-    # Split into train and test
-    # Stratify to maintain class distribution
-    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+    if split_strategy == 'source_holdout':
+        if source_col not in df.columns:
+            raise ValueError(f"Source column '{source_col}' not found for source_holdout split.")
+        if holdout_source is None:
+            raise ValueError("holdout_source must be provided for source_holdout split.")
+        mask = df[source_col].astype(str) == str(holdout_source)
+        X_train_raw = X.loc[~mask].copy()
+        y_train = y.loc[~mask].copy()
+        X_test_raw = X.loc[mask].copy()
+        y_test = y.loc[mask].copy()
+        if len(X_test_raw) == 0:
+            raise ValueError(f"No rows found for holdout_source='{holdout_source}'.")
+    else:
+        X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
     
     # Identify categorical and numerical columns dynamically
     # The standard dataset has 'proto', 'service', 'state' as categorical
@@ -113,11 +147,11 @@ def preprocess_data(df, target_col='attack_cat'):
     
     # Encode target variable
     le = LabelEncoder()
-    # Ensure y is string type for LabelEncoder
+    y_all = y.astype(str)
     y_train = y_train.astype(str)
     y_test = y_test.astype(str)
-    
-    y_train_encoded = le.fit_transform(y_train)
+    le.fit(y_all)
+    y_train_encoded = le.transform(y_train)
     y_test_encoded = le.transform(y_test)
     
     # Save the encoders and preprocessor

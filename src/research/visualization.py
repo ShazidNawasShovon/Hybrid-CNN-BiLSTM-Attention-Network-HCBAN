@@ -59,7 +59,12 @@ class ResearchVisualizer:
         elif y_score.ndim == 2 and y_score.shape[1] == 1 and len(classes) == 2:
             y_score = np.column_stack([1.0 - y_score[:, 0], y_score[:, 0]])
         
-        n_classes = len(classes)
+        n_classes = int(y_score.shape[1]) if y_score.ndim == 2 else int(len(classes))
+        if len(classes) != n_classes:
+            if len(classes) > n_classes:
+                classes = classes[:n_classes]
+            else:
+                classes = [str(i) for i in range(n_classes)]
         if n_classes == 2:
             fpr, tpr, _ = roc_curve(y_true, y_score[:, 1])
             roc_auc = auc(fpr, tpr)
@@ -200,6 +205,52 @@ class ResearchVisualizer:
         plt.close()
         print(f"Saved metrics comparison plot to {self.output_dir}/metrics_comparison.png")
 
+    def plot_source_holdout_accuracy(self):
+        keys = [k for k in self.results.keys() if k.startswith('SourceHoldout_')]
+        if not keys:
+            return
+
+        groups = {}
+        for k in keys:
+            rem = k.replace('SourceHoldout_', '', 1)
+            if rem.startswith('label_'):
+                task_name = 'label'
+                src = rem.replace('label_', '', 1)
+            elif rem.startswith('attack_cat_'):
+                task_name = 'attack_cat'
+                src = rem.replace('attack_cat_', '', 1)
+            else:
+                task_name = 'label'
+                src = rem
+            groups.setdefault(task_name, []).append((src, self.results.get(k, {})))
+
+        for task_name, items in groups.items():
+            rows = []
+            for src, v in sorted(items, key=lambda x: x[0]):
+                acc = v.get('accuracy', [0])
+                auc_v = v.get('auc', [0])
+                rows.append({
+                    'source': src,
+                    'accuracy': float(acc[0]) if isinstance(acc, list) and acc else float(acc),
+                    'auc': float(auc_v[0]) if isinstance(auc_v, list) and auc_v else float(auc_v),
+                })
+            df = pd.DataFrame(rows)
+            if df.empty:
+                continue
+            df = df.sort_values('accuracy', ascending=False)
+
+            plt.figure(figsize=(10, 5))
+            sns.set_style("whitegrid")
+            sns.barplot(data=df, x='source', y='accuracy', color='#4c72b0')
+            plt.ylim(0.0, 1.05)
+            plt.xticks(rotation=45, ha='right')
+            plt.title(f'Source-Holdout Accuracy by Dataset Source ({task_name})')
+            plt.tight_layout()
+            out = os.path.join(self.output_dir, f'source_holdout_accuracy_{task_name}.png')
+            plt.savefig(out, dpi=300)
+            plt.close()
+            print(f"Saved source-holdout accuracy plot to {out}")
+
     def plot_training_history_single(self, history):
         """
         Plots training and validation accuracy/loss curves.
@@ -224,12 +275,15 @@ class ResearchVisualizer:
             y_score = np.column_stack([1.0 - y_score, y_score])
         elif y_score.ndim == 2 and y_score.shape[1] == 1 and len(classes) == 2:
             y_score = np.column_stack([1.0 - y_score[:, 0], y_score[:, 0]])
+        n_classes = int(y_score.shape[1]) if y_score.ndim == 2 else int(len(classes))
+        if len(classes) != n_classes:
+            classes = [str(i) for i in range(n_classes)]
 
         self.plot_confusion_matrix(y_true, y_pred, classes)
 
         plt.figure(figsize=(10, 8))
-        n_classes = len(classes)
-        if n_classes == 2:
+        y_unique = np.unique(y_true).size
+        if n_classes == 2 and y_unique <= 2:
             fpr, tpr, _ = roc_curve(y_true, y_score[:, 1])
             roc_auc_val = auc(fpr, tpr)
             plt.plot(fpr, tpr, color='#4c72b0', lw=2, label=f'ROC curve (area = {roc_auc_val:0.2f})')
@@ -256,7 +310,7 @@ class ResearchVisualizer:
         plt.ylim([0.0, 1.05])
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
-        plt.title('Holdout Test ROC (Multi-Class)')
+        plt.title('Holdout Test ROC')
         plt.legend(loc="lower right")
         plt.savefig(os.path.join(self.output_dir, 'holdout_roc_curve.png'), dpi=300)
         plt.close()
@@ -285,20 +339,20 @@ if __name__ == "__main__":
     viz = ResearchVisualizer()
     classes = None
     label_encoder_path = os.path.join('models', 'label_encoder.joblib')
-    if os.path.exists(label_encoder_path):
+    pred_files = glob.glob(os.path.join('results', 'fold_*_predictions.npz'))
+    if pred_files:
+        data = np.load(pred_files[0])
+        n_classes = int(data['y_pred_prob'].shape[1])
+        classes = [str(i) for i in range(n_classes)]
+    elif os.path.exists(label_encoder_path):
         le = joblib.load(label_encoder_path)
         classes = [str(x) for x in le.classes_]
     else:
-        pred_files = glob.glob(os.path.join('results', 'fold_*_predictions.npz'))
-        if pred_files:
-            data = np.load(pred_files[0])
-            n_classes = int(data['y_pred_prob'].shape[1])
-            classes = [str(i) for i in range(n_classes)]
-        else:
-            classes = []
+        classes = []
 
     viz.plot_metrics_comparison()
     if classes:
         viz.plot_roc_curve(classes)
         viz.plot_training_history()
         viz.plot_holdout_results(classes)
+    viz.plot_source_holdout_accuracy()

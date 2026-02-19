@@ -88,5 +88,51 @@ def generate_latex_table(results_path='results/research_results.json'):
         print("\n--- Thesis Table (Holdout Test) ---")
         print(df_test.to_string(index=False))
 
+    source_keys = [k for k in data.keys() if k.startswith('SourceHoldout_')]
+    if source_keys:
+        groups = {}
+        for k in source_keys:
+            rem = k.replace('SourceHoldout_', '', 1)
+            if rem.startswith('label_'):
+                task_name = 'label'
+                src = rem.replace('label_', '', 1)
+            elif rem.startswith('attack_cat_'):
+                task_name = 'attack_cat'
+                src = rem.replace('attack_cat_', '', 1)
+            else:
+                task_name = 'label'
+                src = rem
+            groups.setdefault(task_name, []).append((src, data.get(k, {})))
+
+        for task_name, items in groups.items():
+            rows = []
+            for src, v in sorted(items, key=lambda x: x[0]):
+                row = {'Holdout Source': src}
+                for mk, label in metrics.items():
+                    val = v.get(mk, [0])
+                    if isinstance(val, list):
+                        row[label] = float(val[0]) if val else 0.0
+                    else:
+                        row[label] = float(val)
+                rows.append(row)
+
+            df_src = pd.DataFrame(rows)
+            csv_path = f'results/thesis_source_holdout_{task_name}_table.csv'
+            df_src.to_csv(csv_path, index=False)
+            print(f"Saved source-holdout table to {csv_path}")
+
+            try:
+                latex_code = df_src.to_latex(index=False, caption=f"Source-Holdout (Dataset-Shift) Evaluation ({task_name})", label=f"tab:source_holdout_{task_name}")
+            except AttributeError:
+                latex_code = df_src.style.to_latex(caption=f"Source-Holdout (Dataset-Shift) Evaluation ({task_name})", label=f"tab:source_holdout_{task_name}")
+
+            latex_path = f'results/thesis_source_holdout_{task_name}_table.tex'
+            with open(latex_path, 'w') as f:
+                f.write(latex_code)
+            print(f"Saved source-holdout LaTeX table to {latex_path}")
+
+            print(f"\n--- Thesis Table (Source Holdout: {task_name}) ---")
+            print(df_src.to_string(index=False))
+
 if __name__ == "__main__":
     generate_latex_table()

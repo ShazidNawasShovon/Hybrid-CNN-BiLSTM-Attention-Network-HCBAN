@@ -3,7 +3,6 @@ import os
 import time
 import json
 
-# Add the project root directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 import pandas as pd
@@ -17,22 +16,96 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from imblearn.under_sampling import RandomUnderSampler
 
 from src.research.hcban_model import HCBAN
+from src.research.tbgmt_model import TBGMT
 from src.research.ensemble_model import HybridEnsemble
+from src.research.autoencoder import fit_autoencoder_recon_error
 from src.data_preprocessing import load_data as load_raw_data, preprocess_data
 
+
+def _load_env(path):
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError:
+        return
+
 class ResearchPipeline:
-    def __init__(self, data_path='processed_data', n_splits=5, batch_size=256, epochs=10):
+    def __init__(
+        self,
+        data_path='processed_data',
+        n_splits=2,
+        batch_size=256,
+        epochs=2,
+        model_name='tbgmt',
+        enable_amp=True,
+        enable_anomaly_feature=False,
+        ae_epochs=2,
+        default_task_choice=2,
+        balance_type='hybrid',
+    ):
         self.data_path = data_path
         self.n_splits = n_splits
         self.batch_size = batch_size
         self.epochs = epochs
+        self.model_name = model_name
+        self.enable_amp = enable_amp
+        self.enable_anomaly_feature = enable_anomaly_feature
+        self.ae_epochs = ae_epochs
+        self.default_task_choice = default_task_choice
+        self.balance_type = balance_type
         self.results = {}
         self.target_col = None
         # Set device
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.use_amp = bool(self.enable_amp and self.device.type == 'cuda')
         print(f"Using device: {self.device}")
+
+    def _add_anomaly_feature(self, X_train_2d, y_train, X_eval_2d_list):
+        if not self.enable_anomaly_feature:
+            return X_train_2d, list(X_eval_2d_list)
+        X_train_2d = np.asarray(X_train_2d, dtype=np.float32)
+        X_eval_2d_list = [np.asarray(x, dtype=np.float32) for x in X_eval_2d_list]
+        y_train = np.asarray(y_train, dtype=int)
+
+        if self.n_classes == 2:
+            normal_class = int(np.bincount(y_train).argmax()) if y_train.size else 0
+            X_fit = X_train_2d[y_train == normal_class]
+            if X_fit.shape[0] < 100:
+                X_fit = X_train_2d
+        else:
+            X_fit = X_train_2d
+
+        train_err = fit_autoencoder_recon_error(
+            X_fit,
+            X_train_2d,
+            device=self.device,
+            epochs=self.ae_epochs,
+        )
+        eval_errs = [
+            fit_autoencoder_recon_error(
+                X_fit,
+                x,
+                device=self.device,
+                epochs=max(1, int(self.ae_epochs // 2)),
+            )
+            for x in X_eval_2d_list
+        ]
+
+        X_train_aug = np.concatenate([X_train_2d, train_err.reshape(-1, 1)], axis=1)
+        X_eval_aug_list = [np.concatenate([x, e.reshape(-1, 1)], axis=1) for x, e in zip(X_eval_2d_list, eval_errs)]
+        return X_train_aug, X_eval_aug_list
         
-    def setup_dataset(self, choice=None, task_choice=None):
+    def setup_dataset(self, choice=None, task_choice=None, split_strategy='stratified', holdout_source=None, include_source_feature=True):
         print("\n--- Dataset Selection ---")
         print("1. Split Dataset (UNSW_NB15_training-set.csv + testing-set.csv)")
         print("2. Combined Dataset (combined_dataset_final.csv)")
@@ -69,14 +142,23 @@ class ResearchPipeline:
             try:
                 task_choice = input("Select task (1 or 2): ").strip()
             except EOFError:
-                task_choice = '1'
-        self.target_col = 'attack_cat' if task_choice == '2' else 'label'
+                task_choice = '2'
+                # task_choice = str(self.default_task_choice // 2)
+        self.target_col = 'attack_cat' if str(task_choice) == '2' else 'label'
+        self.split_strategy = split_strategy
+        self.holdout_source = holdout_source
         print(f"Selected target: {self.target_col}")
         
         # Load and Preprocess
         print("Loading and preprocessing data...")
         df = load_raw_data(dataset_type=dataset_type, combined_path=combined_path)
-        X_train, X_test, y_train, y_test, features, le = preprocess_data(df, target_col=self.target_col)
+        X_train, X_test, y_train, y_test, features, le = preprocess_data(
+            df,
+            target_col=self.target_col,
+            split_strategy=split_strategy,
+            holdout_source=holdout_source,
+            include_source_feature=include_source_feature,
+        )
         
         # Save processed data (overwriting existing)
         os.makedirs(self.data_path, exist_ok=True)
@@ -101,12 +183,21 @@ class ResearchPipeline:
         self.X_train_reshaped = self.X_train.reshape((self.X_train.shape[0], self.X_train.shape[1], 1))
         self.X_test_reshaped = self.X_test.reshape((self.X_test.shape[0], self.X_test.shape[1], 1))
 
-        self.n_classes = len(np.unique(self.y_train))
+        try:
+            import joblib
+
+            le = joblib.load(os.path.join('models', 'label_encoder.joblib'))
+            self.n_classes = int(len(le.classes_))
+        except Exception:
+            self.n_classes = int(len(np.unique(self.y_train)))
         print(f"Train samples: {len(self.X_train)}, Test samples: {len(self.X_test)}, Features: {self.X_train.shape[1]}, Classes: {self.n_classes}")
 
     def _class_counts(self, y):
         y = np.asarray(y, dtype=int)
-        counts = np.bincount(y, minlength=int(y.max()) + 1 if y.size else 0)
+        if y.size == 0:
+            return np.zeros((0,), dtype=int)
+        minlength = int(self.n_classes) if getattr(self, 'n_classes', None) else int(y.max()) + 1
+        counts = np.bincount(y, minlength=minlength)
         return counts
 
     def _compute_class_weights(self, y):
@@ -133,7 +224,7 @@ class ResearchPipeline:
             if y_pred_prob.ndim == 2 and y_pred_prob.shape[1] == 2:
                 return float(roc_auc_score(y_true, y_pred_prob[:, 1]))
             return float(roc_auc_score(y_true, y_pred_prob))
-        return float(roc_auc_score(y_true, y_pred_prob, multi_class='ovr', average='weighted'))
+        return float(roc_auc_score(y_true, y_pred_prob, multi_class='ovr', average='weighted', labels=list(range(int(self.n_classes)))))
 
     def _print_balance_summary(self, y, title):
         counts = self._class_counts(y)
@@ -155,6 +246,22 @@ class ResearchPipeline:
             return X_train_2d, y_train
 
         imbalance_ratio = float(present.max() / present.min())
+        
+        if self.balance_type == 'none':
+             return X_train_2d, y_train
+             
+        if self.balance_type == 'strict_under':
+            # Undersample all classes to the count of the minority class
+            rus = RandomUnderSampler(sampling_strategy='auto', random_state=42)
+            X_res, y_res = rus.fit_resample(X_train_2d, y_train)
+            return X_res, y_res
+            
+        if self.balance_type == 'smote':
+             from imblearn.over_sampling import SMOTE
+             smote = SMOTE(random_state=42)
+             X_res, y_res = smote.fit_resample(X_train_2d, y_train)
+             return X_res, y_res
+
         if imbalance_ratio <= 10.0:
             return X_train_2d, y_train
 
@@ -194,15 +301,40 @@ class ResearchPipeline:
                     replacement=True,
                 )
 
-        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=(sampler is None), sampler=sampler)
-        val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+        if self.device.type == 'cuda':
+            print(f"Using device: {self.device} // GPU")
+            num_workers = 2
+            pin_memory = True
+        else:
+            num_workers = 0
+            pin_memory = False
+            print(f"Using device: {self.device} // CPU")
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.batch_size,
+            shuffle=(sampler is None),
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
 
-        model = HCBAN(input_channels=1, input_length=X_train_3d.shape[1], n_classes=self.n_classes)
+        if self.model_name == 'hcban':
+            model = HCBAN(input_channels=1, input_length=X_train_3d.shape[1], n_classes=self.n_classes)
+        else:
+            model = TBGMT(input_channels=1, input_length=X_train_3d.shape[1], n_classes=self.n_classes)
         model.to(self.device)
 
         weight_tensor = torch.tensor(class_weights, dtype=torch.float32).to(self.device) if class_weights.size else None
         criterion = nn.CrossEntropyLoss(weight=weight_tensor)
         optimizer = optim.Adam(model.parameters(), lr=0.001)
+        scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
         history = {'accuracy': [], 'val_accuracy': [], 'loss': [], 'val_loss': []}
         best_val_loss = float('inf')
@@ -210,23 +342,38 @@ class ResearchPipeline:
         patience_counter = 0
 
         for epoch in range(self.epochs):
+            print(f"[{fold_tag}] Epoch {epoch+1}/{self.epochs} started", flush=True)
             model.train()
             running_loss = 0.0
             correct = 0
             total = 0
 
-            for inputs, labels in train_loader:
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
                 optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
+                with torch.amp.autocast('cuda', enabled=self.use_amp):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 running_loss += loss.item() * inputs.size(0)
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
+
+                if (batch_idx + 1) % 100 == 0:
+                    avg_loss = running_loss / total if total > 0 else 0.0
+                    avg_acc = correct / total if total > 0 else 0.0
+                    print(
+                        f"[{fold_tag}] Epoch {epoch+1}/{self.epochs} "
+                        f"Batch {batch_idx+1}/{len(train_loader)} "
+                        f"Loss: {loss.item():.4f} "
+                        f"AvgLoss: {avg_loss:.4f} "
+                        f"AvgAcc: {avg_acc:.4f}",
+                        flush=True,
+                    )
 
             epoch_loss = running_loss / total
             epoch_acc = correct / total
@@ -239,8 +386,9 @@ class ResearchPipeline:
             with torch.no_grad():
                 for inputs, labels in val_loader:
                     inputs, labels = inputs.to(self.device), labels.to(self.device)
-                    outputs = model(inputs)
-                    loss = criterion(outputs, labels)
+                    with torch.amp.autocast('cuda', enabled=self.use_amp):
+                        outputs = model(inputs)
+                        loss = criterion(outputs, labels)
 
                     val_loss += loss.item() * inputs.size(0)
                     _, predicted = torch.max(outputs.data, 1)
@@ -273,7 +421,8 @@ class ResearchPipeline:
         return model, val_loader, history
 
     def run_kfold_cv(self):
-        print(f"\nRunning {self.n_splits}-Fold Cross-Validation on Hybrid Deep-Ensemble (PyTorch HCBAN + XGB/LGBM/RF)...")
+        backbone_name = self.model_name.upper()
+        print(f"\nRunning {self.n_splits}-Fold Cross-Validation on Hybrid Deep-Ensemble (PyTorch {backbone_name} + XGB/LGBM/RF)...")
         skf = StratifiedKFold(n_splits=self.n_splits, shuffle=True, random_state=42)
         
         fold_metrics = {
@@ -295,12 +444,14 @@ class ResearchPipeline:
 
             X_train_2d = X_train_fold.reshape(X_train_fold.shape[0], -1)
             X_train_2d, y_train_fold = self._balance_training_data(X_train_2d, y_train_fold)
+            if fold == 1:
+                self._print_balance_summary(y_train_fold, "Train (Balanced)")
             X_train_fold = X_train_2d.reshape(X_train_2d.shape[0], X_train_2d.shape[1], 1)
 
             class_weights = self._compute_class_weights(y_train_fold)
             sample_weights = self._compute_sample_weights(y_train_fold, class_weights)
 
-            print("Training HCBAN (PyTorch) with class-weighted loss...")
+            print(f"Training {backbone_name} (PyTorch) with class-weighted loss...")
             model, val_loader, history = self._train_hcban(
                 X_train_fold,
                 y_train_fold,
@@ -313,7 +464,9 @@ class ResearchPipeline:
             # --- 3. Train ML Ensemble (XGBoost, LightGBM, RF) ---
             print("Training ML Ensemble (XGBoost, LightGBM, Random Forest)...")
             ensemble = HybridEnsemble(n_classes=self.n_classes)
-            ensemble.fit(X_train_2d, y_train_fold, sample_weight=sample_weights)
+            X_val_2d = X_val_fold.reshape(X_val_fold.shape[0], -1)
+            X_train_2d_aug, (X_val_2d_aug,) = self._add_anomaly_feature(X_train_2d, y_train_fold, [X_val_2d])
+            ensemble.fit(X_train_2d_aug, y_train_fold, sample_weight=sample_weights)
             
             training_time = time.time() - start_time
             
@@ -331,8 +484,7 @@ class ResearchPipeline:
             p_hcban = np.concatenate(p_hcban, axis=0)
             
             # ML Ensemble Probabilities (Input needs to be 2D)
-            X_val_2d = X_val_fold.reshape(X_val_fold.shape[0], -1)
-            p_ensemble = ensemble.predict_proba(X_val_2d)
+            p_ensemble = ensemble.predict_proba(X_val_2d_aug)
             
             y_pred_dl = np.argmax(p_hcban, axis=1)
             y_pred_ml = np.argmax(p_ensemble, axis=1)
@@ -349,6 +501,22 @@ class ResearchPipeline:
             prec = precision_score(y_val_fold, y_pred, average='weighted', zero_division=0)
             rec = recall_score(y_val_fold, y_pred, average='weighted', zero_division=0)
             f1 = f1_score(y_val_fold, y_pred, average='weighted', zero_division=0)
+            
+            # Per-class metrics
+            prec_per = precision_score(y_val_fold, y_pred, average=None, zero_division=0)
+            rec_per = recall_score(y_val_fold, y_pred, average=None, zero_division=0)
+            f1_per = f1_score(y_val_fold, y_pred, average=None, zero_division=0)
+            
+            for i, (p_val, r_val, f_val) in enumerate(zip(prec_per, rec_per, f1_per)):
+                k_p = f'precision_class_{i}'
+                k_r = f'recall_class_{i}'
+                k_f = f'f1_class_{i}'
+                if k_p not in fold_metrics: fold_metrics[k_p] = []
+                if k_r not in fold_metrics: fold_metrics[k_r] = []
+                if k_f not in fold_metrics: fold_metrics[k_f] = []
+                fold_metrics[k_p].append(float(p_val))
+                fold_metrics[k_r].append(float(r_val))
+                fold_metrics[k_f].append(float(f_val))
             
             try:
                 auc = self._compute_auc(y_val_fold, y_pred_prob)
@@ -413,7 +581,8 @@ class ResearchPipeline:
 
         class_weights = self._compute_class_weights(y_train_sub)
 
-        print("Training HCBAN (PyTorch) with class-weighted loss for holdout test...")
+        backbone_name = self.model_name.upper()
+        print(f"Training {backbone_name} (PyTorch) with class-weighted loss for holdout test...")
         model, val_loader, history = self._train_hcban(
             X_train_sub,
             y_train_sub,
@@ -430,9 +599,11 @@ class ResearchPipeline:
         sample_weights_full = self._compute_sample_weights(y_train_bal, class_weights_full)
 
         ensemble = HybridEnsemble(n_classes=self.n_classes)
-        ensemble.fit(X_train_2d, y_train_bal, sample_weight=sample_weights_full)
-
         X_val_2d = X_val_sub.reshape(X_val_sub.shape[0], -1)
+        X_test_2d = self.X_test
+        X_train_2d_aug, (X_val_2d_aug, X_test_2d_aug) = self._add_anomaly_feature(X_train_2d, y_train_bal, [X_val_2d, X_test_2d])
+        ensemble.fit(X_train_2d_aug, y_train_bal, sample_weight=sample_weights_full)
+
         model.eval()
         p_hcban_val = []
         with torch.no_grad():
@@ -442,7 +613,7 @@ class ResearchPipeline:
                 probs = torch.softmax(outputs, dim=1)
                 p_hcban_val.append(probs.cpu().numpy())
         p_hcban_val = np.concatenate(p_hcban_val, axis=0)
-        p_ensemble_val = ensemble.predict_proba(X_val_2d)
+        p_ensemble_val = ensemble.predict_proba(X_val_2d_aug)
         y_pred_dl_val = np.argmax(p_hcban_val, axis=1)
         y_pred_ml_val = np.argmax(p_ensemble_val, axis=1)
         acc_dl_val = float(accuracy_score(y_val_sub, y_pred_dl_val))
@@ -468,7 +639,7 @@ class ResearchPipeline:
                 p_hcban.append(probs.cpu().numpy())
         p_hcban = np.concatenate(p_hcban, axis=0)
 
-        p_ensemble = ensemble.predict_proba(self.X_test)
+        p_ensemble = ensemble.predict_proba(X_test_2d_aug)
 
         y_pred_prob = (w_dl * p_hcban) + (w_ml * p_ensemble)
         y_pred = np.argmax(y_pred_prob, axis=1)
@@ -477,6 +648,17 @@ class ResearchPipeline:
         prec = float(precision_score(self.y_test, y_pred, average='weighted', zero_division=0))
         rec = float(recall_score(self.y_test, y_pred, average='weighted', zero_division=0))
         f1 = float(f1_score(self.y_test, y_pred, average='weighted', zero_division=0))
+        
+        # Per-class metrics
+        prec_per = precision_score(self.y_test, y_pred, average=None, zero_division=0)
+        rec_per = recall_score(self.y_test, y_pred, average=None, zero_division=0)
+        f1_per = f1_score(self.y_test, y_pred, average=None, zero_division=0)
+        
+        per_class_metrics = {}
+        for i, (p_val, r_val, f_val) in enumerate(zip(prec_per, rec_per, f1_per)):
+            per_class_metrics[f'precision_class_{i}'] = [float(p_val)]
+            per_class_metrics[f'recall_class_{i}'] = [float(r_val)]
+            per_class_metrics[f'f1_class_{i}'] = [float(f_val)]
         try:
             auc = float(self._compute_auc(self.y_test, y_pred_prob))
         except Exception as e:
@@ -491,25 +673,127 @@ class ResearchPipeline:
             'recall': [rec],
             'f1': [f1],
             'auc': [auc],
+            **per_class_metrics
         }
+
+        # Conditionally save predictions to avoid overwriting main holdout results
+        is_source_holdout = getattr(self, 'split_strategy', 'stratified') == 'source_holdout'
+        if is_source_holdout:
+            pred_filename = f"source_holdout_{self.holdout_source}_{self.target_col}_predictions.npz"
+            hist_filename = f"source_holdout_{self.holdout_source}_{self.target_col}_history.json"
+        else:
+            pred_filename = 'holdout_test_predictions.npz'
+            hist_filename = 'holdout_history.json'
 
         try:
             np.savez_compressed(
-                os.path.join('results', 'holdout_test_predictions.npz'),
+                os.path.join('results', pred_filename),
                 y_true=self.y_test,
                 y_pred=y_pred,
                 y_pred_prob=y_pred_prob,
             )
         except Exception as e:
-            print(f"Error saving holdout test predictions: {e}")
+            print(f"Error saving predictions to {pred_filename}: {e}")
 
         try:
-            with open(os.path.join('results', 'holdout_history.json'), 'w') as f:
+            with open(os.path.join('results', hist_filename), 'w') as f:
                 json.dump(history, f)
         except Exception as e:
-            print(f"Error saving holdout history: {e}")
-        
+            print(f"Error saving history to {hist_filename}: {e}")
+
+        # Benchmark inference for deployment considerations
+        try:
+            self._benchmark_inference(model)
+        except Exception as e:
+            print(f"Benchmarking failed: {e}")
+
         self.save_results()
+
+    def _benchmark_inference(self, model, repeats=50, batch_sizes=(1, 32, 128)):
+        os.makedirs('results', exist_ok=True)
+        report = {
+            'model_name': self.model_name,
+            'input_length': int(getattr(self, 'X_test_reshaped', np.zeros((0, 0, 0))).shape[1] if hasattr(self, 'X_test_reshaped') else 0),
+        }
+        def param_count(m):
+            try:
+                return int(sum(p.numel() for p in m.parameters()))
+            except Exception:
+                return 0
+        report['param_count'] = param_count(model)
+        X = getattr(self, 'X_test_reshaped', None)
+        if X is None or X.size == 0:
+            try:
+                X = self.X_train_reshaped
+            except Exception:
+                X = None
+        for device_name in ['cpu', 'cuda' if torch.cuda.is_available() else 'cpu']:
+            if device_name == 'cuda' and not torch.cuda.is_available():
+                continue
+            model_device = torch.device(device_name)
+            model_eval = model.to(model_device)
+            model_eval.eval()
+            results = []
+            with torch.no_grad():
+                for bs in batch_sizes:
+                    if X is not None and X.shape[0] >= bs:
+                        sample = torch.tensor(X[:bs], dtype=torch.float32, device=model_device)
+                    else:
+                        ilen = int(report['input_length'] or 32)
+                        sample = torch.randn((bs, ilen, 1), device=model_device, dtype=torch.float32)
+                    for _ in range(3):
+                        _ = model_eval(sample)
+                    if model_device.type == 'cuda':
+                        torch.cuda.synchronize()
+                    t0 = time.time()
+                    for _ in range(repeats):
+                        _ = model_eval(sample)
+                    if model_device.type == 'cuda':
+                        torch.cuda.synchronize()
+                    t1 = time.time()
+                    total_samples = repeats * bs
+                    elapsed = t1 - t0
+                    per_sample_ms = (elapsed / total_samples) * 1000.0 if total_samples else float('inf')
+                    throughput = total_samples / elapsed if elapsed > 0 else 0.0
+                    results.append({
+                        'batch_size': int(bs),
+                        'repeats': int(repeats),
+                        'elapsed_sec': float(elapsed),
+                        'per_sample_ms': float(per_sample_ms),
+                        'throughput_sps': float(throughput),
+                    })
+            report[device_name] = results
+        try:
+            with open('results/deployment_report.json', 'w') as f:
+                json.dump(report, f, indent=4)
+            print("Saved deployment inference benchmark to results/deployment_report.json")
+        except Exception as e:
+            print(f"Failed to save deployment report: {e}")
+
+    def run_source_holdout(self, holdout_source, task_choice='1'):
+        target_name = 'label' if str(task_choice) == '1' else 'attack_cat'
+        print(f"\nRunning source-holdout evaluation (target={target_name}, holdout_source={holdout_source})...")
+        base_holdout = self.results.get('Holdout_Test')
+        self.setup_dataset(choice='2', task_choice=str(task_choice), split_strategy='source_holdout', holdout_source=holdout_source, include_source_feature=False)
+        self.load_data()
+        self.run_holdout_test()
+        self.results[f"SourceHoldout_{target_name}_{holdout_source}"] = self.results.get('Holdout_Test', {})
+        if base_holdout is not None:
+            self.results['Holdout_Test'] = base_holdout
+        self.save_results()
+
+    def run_source_holdout_all(self, task_choices=('1', '2')):
+        df = load_raw_data(dataset_type='combined', combined_path=r'd:\Personal\Development\Python\Hybrid Explainable AI Moon\dataset_combined\combined_dataset_final.csv')
+        if 'dataset_source' not in df.columns:
+            print("dataset_source column not found; cannot run source-holdout evaluation.")
+            return
+        sources = sorted({str(x) for x in df['dataset_source'].dropna().unique().tolist()})
+        if not sources:
+            print("No dataset_source values found.")
+            return
+        for tc in task_choices:
+            for s in sources:
+                self.run_source_holdout(s, task_choice=str(tc))
         
     def save_results(self):
         os.makedirs('results', exist_ok=True)
@@ -550,25 +834,45 @@ class ResearchPipeline:
             print(f"{metric.capitalize():<15} | {mean:.4f}     | {std:.4f}     | +/- {ci:.4f}")
 
 if __name__ == "__main__":
-    # Ensure GPU is visible (PyTorch)
     if torch.cuda.is_available():
         print(f"✅ GPU Detected: {torch.cuda.get_device_name(0)}")
         print(f"   Device Count: {torch.cuda.device_count()}")
     else:
         print("⚠️ No GPU detected. Training will be slow on CPU.")
 
-    # Reduced epochs for quick testing, use 20-30 for actual run
-    pipeline = ResearchPipeline(epochs=20) 
-    # Use Combined Dataset by default for automated runs
-    pipeline.setup_dataset(choice='2', task_choice='1')
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    env_path = os.path.join(project_root, '.env')
+    _load_env(env_path)
+
+    model_name = os.getenv('MODEL_NAME', 'tbgmt').strip().lower()
+    enable_amp = os.getenv('ENABLE_AMP', '1').strip() not in {'0', 'false', 'no'}
+    enable_anomaly_feature = os.getenv('ENABLE_ANOMALY_FEATURE', '1').strip() in {'1', 'true', 'yes'}
+    ae_epochs = int(os.getenv('AE_EPOCHS', '10').strip() or '10')
+    run_source_holdout_all = os.getenv('RUN_SOURCE_HOLDOUT_ALL', '1').strip() in {'1', 'true', 'yes'}
+    balance_type = os.getenv('BALANCE_TYPE', 'hybrid').strip().lower()
+    batch_size = int(os.getenv('BATCH_SIZE', '256').strip() or '256')
+
+    pipeline = ResearchPipeline(
+        epochs=2,
+        model_name=model_name,
+        enable_amp=enable_amp,
+        enable_anomaly_feature=enable_anomaly_feature,
+        ae_epochs=ae_epochs,
+        balance_type=balance_type,
+        batch_size=batch_size,
+    )
+    pipeline.setup_dataset(choice='2', task_choice='2')
     pipeline.load_data()
     pipeline.run_kfold_cv()
     pipeline.run_holdout_test()
+    if run_source_holdout_all:
+        pipeline.run_source_holdout_all()
     pipeline.generate_report()
 
     try:
         from src.research.visualization import ResearchVisualizer
         from src.research.generate_tables import generate_latex_table
+        from src.research.visualization import ResearchVisualizer as _RV
 
         viz = ResearchVisualizer()
         viz.plot_metrics_comparison()
@@ -583,6 +887,7 @@ if __name__ == "__main__":
             viz.plot_roc_curve(classes)
             viz.plot_training_history()
             viz.plot_holdout_results(classes)
+        viz.plot_source_holdout_accuracy()
 
         generate_latex_table()
     except Exception as e:
