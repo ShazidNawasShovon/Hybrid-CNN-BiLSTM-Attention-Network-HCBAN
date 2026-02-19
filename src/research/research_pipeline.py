@@ -43,13 +43,13 @@ class ResearchPipeline:
     def __init__(
         self,
         data_path='processed_data',
-        n_splits=2,
+        n_splits=5,
         batch_size=256,
-        epochs=2,
+        epochs=15,
         model_name='tbgmt',
         enable_amp=True,
         enable_anomaly_feature=False,
-        ae_epochs=2,
+        ae_epochs=10,
         default_task_choice=2,
         balance_type='hybrid',
     ):
@@ -853,7 +853,7 @@ if __name__ == "__main__":
     batch_size = int(os.getenv('BATCH_SIZE', '256').strip() or '256')
 
     pipeline = ResearchPipeline(
-        epochs=2,
+        epochs=15,
         model_name=model_name,
         enable_amp=enable_amp,
         enable_anomaly_feature=enable_anomaly_feature,
